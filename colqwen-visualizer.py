@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar(self.central_widget)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setGeometry(425, 400, 400, 100)
+        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid black; border-radius: 5px; text-align: center; } QProgressBar::chunk { background-color: cyan; }")
         self.progress_bar.show()
 
         worker = Worker(
@@ -281,7 +282,6 @@ class MainWindow(QMainWindow):
         self.pdf_box.update()
     
     def progress_fn(self, n):
-        print(f"Progress: {n * 100:.2f}%")
         self.progress_bar.setValue(int(n * 100))
 
 class DocumentQuerySelectionDialog(QDialog):
