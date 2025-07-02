@@ -10,6 +10,19 @@ import torch
 
 DOCUMENT_EMBEDDING_FILENAME = "page_embeddings.pt"
 DOCUMENT_MASK_FILENAME = "page_masks.pt"
+POPPLER_PATH = "_internal/poppler-24.08.0/Library/bin"  # Adjust this path as necessary
+
+class VisualizedPage:
+    def __init__(self, page_num, image_path, relevancy_score):
+        self.page_num = page_num
+        self.image_path = image_path
+        self.relevancy_score = relevancy_score
+
+    def __repr__(self):
+        return f"GeneratedPage(page_num={self.page_num}, image_path={self.image_path}, relevancy_score={self.relevancy_score})"
+
+    def is_highlighted(self):
+        return self.relevancy_score is not None
 
 def generate_document_and_query(document_path, query, progress_callback=None):
     # This function syncs the UI with the state document_path and query, and also
@@ -24,9 +37,12 @@ def generate_document_and_query(document_path, query, progress_callback=None):
     try:
         print("Document data directory does not exist, generating directory and document image files...")
         os.mkdir(document_name)
-        convert_from_path(document_path, output_folder=document_name, output_file=document_name, fmt="png")
+        convert_from_path(document_path, output_folder=document_name, output_file=document_name, fmt="png", poppler_path=POPPLER_PATH)
     except FileExistsError: 
         print("Document data directory already exists, attempting to load existing data.")
+
+    # Update progress to 0.25
+    progress_callback.emit(0.25) if progress_callback else None
 
     base_page_paths = []
     encoding_file = None
@@ -43,7 +59,11 @@ def generate_document_and_query(document_path, query, progress_callback=None):
         return (None, None)
 
     if (not query) | (query == "<None>"):
-        return (base_page_paths, None)
+        visualized_pages = []
+        for i, path in enumerate(base_page_paths):
+            # Generate a highlighted page for each image in the document
+            visualized_pages.append(VisualizedPage(i + 1, path, None))
+        return visualized_pages
     else:
         print(f"Query exists. Embedding or loading existing checkpoint for document and query")
 
@@ -79,6 +99,9 @@ def generate_document_and_query(document_path, query, progress_callback=None):
                 with torch.no_grad():
                     embedded_image = model(**processed_image)
                     image_embeddings[i, :, :] = embedded_image
+
+                # update progress between 0.25 and 0.7
+                progress_callback.emit(0.25 + (i / len(page_images)) * 0.45) if progress_callback else None
             torch.save(image_embeddings, os.path.join(document_name, DOCUMENT_EMBEDDING_FILENAME))
             torch.save(image_masks, os.path.join(document_name, DOCUMENT_MASK_FILENAME))
         else:
@@ -86,42 +109,52 @@ def generate_document_and_query(document_path, query, progress_callback=None):
             image_embeddings = torch.load(os.path.join(document_name, DOCUMENT_EMBEDDING_FILENAME))
             image_masks = torch.load(os.path.join(document_name, DOCUMENT_MASK_FILENAME))
 
+        # Update progress to 0.75
+        progress_callback.emit(0.75) if progress_callback else None
         
         print(f"Embedding query: {query}")
         with torch.no_grad():
             (model, processor, device) = get_model_and_processor()
             query_embeddings = model(**processor.process_queries([query]).to(device))
 
+        # Update progress to 0.8
+        progress_callback.emit(0.8) if progress_callback else None
+
         relevancy_scores = processor.score_multi_vector(query_embeddings, image_embeddings)[0].numpy()
 
         n_patches = processor.get_n_patches(image_size=page_images[0].size, spatial_merge_size=model.spatial_merge_size)
         
-        print(query_embeddings.repeat([len(page_images), 1, 1]).shape)
         similarity_maps = get_similarity_maps_from_embeddings(image_embeddings, query_embeddings.repeat([len(page_images), 1, 1]), n_patches, image_masks)
         summed_maps = []
         for map in similarity_maps:
             summed_map = map.sum(0)
             summed_maps.append(summed_map)
-        print(len(summed_maps))
-        print(summed_maps[0].shape)
 
         min_relevance = min(relevancy_scores)
         max_relevance = max(relevancy_scores)
 
-        highlighted_page_paths = []
+        visualized_pages = []
         print(f"Generating {len(page_images)} highlighted pages...")
         plt.ioff()
         for i, image in enumerate(page_images):
-            print(f"hihi {((relevancy_scores[i] - min_relevance)/(max_relevance - min_relevance) + 0.1)}")
             tensor_max = torch.max(summed_maps[i])
+            # TODO: currently this adjusts the maximum similarity map value on the page by the relevancy score (normalizing it to the rest of
+            # the document) and then sets the top left-most chunk of the page to that value. this is a hacky way to reduce the highlighting on
+            # the page according to the relevancy score, needs to be changed.
             summed_maps[i][0][0] =  tensor_max / ((relevancy_scores[i] - min_relevance)/(max_relevance - min_relevance) + 0.1)
             (fig, ax) = plot_similarity_map(image, summed_maps[i])
-            path = f"{document_name}/highlighted_page_{i}.png"
+            path = f"{document_name}/highlighted_page_{i + 1}.png"
             fig.savefig(path)
             plt.close(fig)
-            highlighted_page_paths.append(path)
+            visualized_pages.append(VisualizedPage(i + 1, path, relevancy_scores[i]))
 
-        return (highlighted_page_paths, relevancy_scores)
+            # Update progress between 0.85 and 0.99
+            progress_callback.emit(0.8 + (i / len(page_images)) * 0.19) if progress_callback else None
+        
+        # finish progress
+        progress_callback.emit(1.0) if progress_callback else None
+
+        return visualized_pages
 
 def get_model_and_processor():
     global model_singleton
@@ -133,10 +166,13 @@ def get_model_and_processor():
         print("Performing singleton initialization for model objects")
         model_name = "vidore/colqwen2-v1.0"
         device_singleton = get_torch_device("auto")
+        print(f"Using device: {device_singleton}")
         model_singleton = ColQwen2.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            device_map=device_singleton
+            device_map=device_singleton,
+            cache_dir="_internal/_models",
+            local_files_only=True,
         ).eval()
         processor_singleton = ColQwen2Processor.from_pretrained(model_name)
         return (model_singleton, processor_singleton, device_singleton)

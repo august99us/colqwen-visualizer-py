@@ -1,5 +1,5 @@
 
-from model_functions import generate_document_and_query
+from model_functions import generate_document_and_query, VisualizedPage
 from PyQt6.QtCore import (
     QObject,
     QRunnable,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, 
     QDialogButtonBox,
     QWidget,
+    QProgressBar,
 )
 from pyqtwaitingspinner import WaitingSpinner, SpinnerParameters
 
@@ -175,6 +176,7 @@ class MainWindow(QMainWindow):
 
         # Set the central widget of the Window.
         self.setCentralWidget(central_widget)
+        self.central_widget = central_widget  # Store reference to the central widget for later use
 
         self.threadpool = QThreadPool()
         thread_count = self.threadpool.maxThreadCount()
@@ -201,6 +203,11 @@ class MainWindow(QMainWindow):
         self.query_selection.setText(query)
 
         self.spinner.start()
+        self.progress_bar = QProgressBar(self.central_widget)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setGeometry(425, 400, 400, 100)
+        self.progress_bar.show()
+
         worker = Worker(
             generate_document_and_query,
             self.document_path,
@@ -214,48 +221,68 @@ class MainWindow(QMainWindow):
     def finish_fn(self):
         print("Finished processing.")
         self.spinner.stop()
+        self.progress_bar.deleteLater()
 
-    def display_images(self, result):
-        (image_paths, relevancy_scores) = result
-        # This function is used to display the images in the UI.
-        # You can implement the logic to display images here.
-        print(f"Displaying {len(image_paths)} images.")
-
+    def display_images(self, visualized_pages):
         # Clear the existing layout in pdf_box
         for i in reversed(range(self.pdf_box.layout().count())): 
             widget = self.pdf_box.layout().itemAt(i).widget()
             if widget is not None:
                 widget.deleteLater()
+
+        if visualized_pages is None:
+            print("No images to display.")
+            self.pdf_box.layout().addWidget(QLabel("No images to display."))
+            return
         
-        # Get min and max relevancy score
-        min_score = min(relevancy_scores)
-        max_score = max(relevancy_scores)
+        # This function is used to display the images in the UI.
+        # You can implement the logic to display images here.
+        print(f"Displaying {len(visualized_pages)} images.")
+
+        has_relevancy_scores = visualized_pages[0].is_highlighted()
+        if has_relevancy_scores:
+            # If relevancy scores are provided, sort by them and get min/max scores
+            visualized_pages = sorted(visualized_pages, key=lambda p: p.relevancy_score, reverse=True)
+
+            # Get min and max relevancy score
+            min_score = min(visualized_pages, key=lambda p: p.relevancy_score).relevancy_score
+            max_score = max(visualized_pages, key=lambda p: p.relevancy_score).relevancy_score
 
         # Display new images
-        for i, image_path in enumerate(image_paths):
+        for i, visualized_page in enumerate(visualized_pages):
             row = QWidget()
             row.setLayout(QHBoxLayout())
             label = QLabel()
-            label.setPixmap(QPixmap.fromImage(QImage(image_path)).scaledToWidth(1000))
+            label.setPixmap(QPixmap.fromImage(QImage(visualized_page.image_path)).scaledToWidth(1000))
             row.layout().addWidget(label)
 
-            if relevancy_scores is not None:
-                score_label = QLabel(f"{relevancy_scores[i]}")
+            # Setup annotation area for the page
+            annotation_area = QWidget()
+            annotation_area.setLayout(QVBoxLayout())
+            # Add relevancy score if available
+            if has_relevancy_scores:
+                score_label = QLabel(f"{visualized_page.relevancy_score}")
                 score_label.setAutoFillBackground(True)
-                (background, text) = get_relevancy_color_tags_from_percentage((relevancy_scores[i] - min_score)/(max_score - min_score))
+                (background, text) = get_relevancy_color_tags_from_percentage((visualized_page.relevancy_score - min_score)/(max_score - min_score))
                 palette = score_label.palette()
                 palette.setColor(QPalette.ColorRole.Window, QColor(background))
                 palette.setColor(QPalette.ColorRole.WindowText, QColor(text))
                 score_label.setPalette(palette)
 
-                row.layout().addWidget(score_label)
+                annotation_area.layout().addWidget(score_label)
+            # Add page num label
+            page_num_label = QLabel(f"Page {visualized_page.page_num}")
+            page_num_label.setFixedHeight(40)
+            annotation_area.layout().addWidget(page_num_label)
+            row.layout().addWidget(annotation_area)
 
             self.pdf_box.layout().addWidget(row)
         
         self.pdf_box.update()
     
     def progress_fn(self, n):
-        print(f"{n:.1f}% done")
+        print(f"Progress: {n * 100:.2f}%")
+        self.progress_bar.setValue(int(n * 100))
 
 class DocumentQuerySelectionDialog(QDialog):
     def __init__(self, parent=None, document_path="<Not Selected>", query="<None>"):
